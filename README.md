@@ -230,7 +230,141 @@ And test it `CALL addNewComment (3, "new comment using stored procedure", 4);`, 
 ### Exercise 4
 Make a materialized view that has json objects with questions and its answeres, but no comments. Both the question and each of the answers must have the display name of the user, the text body, and the score.
 
-todo
+__Table to hold the cache__
+```sql
+DROP TABLE IF EXISTS q_and_a_cache;
+
+CREATE TABLE q_and_a_cache
+(
+ QuestionId int not null primary key,
+ Detail     JSON
+);
+```
+__Create helper functions__
+```sql
+DROP FUNCTION IF EXISTS createMaterializedView_item;
+DELIMITER $$
+
+CREATE FUNCTION createMaterializedView_item (p_id INT)
+RETURNS json
+READS SQL DATA
+BEGIN
+  declare details JSON;
+  select JSON_OBJECT("score", rootPosts.Score, "text", rootPosts.Body, "user", users.DisplayName, "answers", answers.details) into details
+   from (
+     select *
+     from posts
+     where Id = p_id and PostTypeId = 1
+   ) as rootPosts
+   left join users on rootPosts.OwnerUserId = users.Id
+   left join (
+     SELECT ParentId,
+            JSON_ARRAYAGG(JSON_OBJECT("score", Score, "text", Body, "user", users.DisplayName)) as details
+     from posts
+       left join users on posts.OwnerUserId = users.Id
+     where ParentId = p_id and PostTypeId = 2
+     GROUP BY ParentId
+   ) as answers
+     on answers.ParentId = rootPosts.Id;
+  RETURN details;
+END $$
+
+DROP procedure IF EXISTS `createMaterializedView_rebuild` $$
+
+CREATE PROCEDURE `createMaterializedView_rebuild`()
+BEGIN
+ truncate q_and_a_cache;
+
+ INSERT INTO q_and_a_cache
+   select Id,  createMaterializedView_item(Id) from posts where PostTypeId = 1;
+END$$
+
+DELIMITER ;
+```
+
+__Setup triggers__
+```sql
+DROP TRIGGER if exists create_materialized_view_triggered_by_insert;
+DELIMITER $$
+
+CREATE TRIGGER create_materialized_view_triggered_by_insert
+AFTER INSERT ON posts
+FOR EACH ROW
+BEGIN
+  if (NEW.ParentId is null) then
+    insert into q_and_a_cache (QuestionId, Detail) values (NEW.Id, createMaterializedView_item(NEW.Id));
+  else
+    update q_and_a_cache set Detail = createMaterializedView_item(NEW.ParentId) where QuestionId = NEW.ParentId;
+  end if;
+END $$
+
+DROP TRIGGER if exists create_materialized_view_triggered_by_update$$
+CREATE TRIGGER create_materialized_view_triggered_by_update
+AFTER UPDATE ON posts
+FOR EACH ROW
+BEGIN
+  -- dont expect an answer to change its parent, answers cant be moves
+  if (NEW.ParentId is null) then
+    update q_and_a_cache set Detail = createMaterializedView_item(NEW.Id) where QuestionId = NEW.Id;
+  else
+    update q_and_a_cache set Detail = createMaterializedView_item(NEW.ParentId) where QuestionId = NEW.ParentId;
+  end if;
+END $$
+
+DROP TRIGGER if exists create_materialized_view_triggered_by_delete$$
+CREATE TRIGGER create_materialized_view_triggered_by_delete
+AFTER DELETE ON posts
+FOR EACH ROW
+BEGIN
+  if (OLD.ParentId is null) then
+    delete from q_and_a_cache where QuestionId = OLD.Id;
+  else
+    update q_and_a_cache set Detail = createMaterializedView_item(OLD.ParentId) where QuestionId = OLD.ParentId;
+  end if;
+END $$
+
+DELIMITER ;
+```
+
+__Build cache__
+```sql
+CALL createMaterializedView_rebuild();
+```
+
+__Test it__
+```sql
+delete from posts where Id = 2 or Id = 4;
+
+select QuestionId, left(Detail, 100) from q_and_a_cache where QuestionId <= 5;
+
+
+
+insert into posts (Id, PostTypeId, Body, OwnerUserId, LastActivityDate, Title, AnswerCount, CommentCount, FavoriteCount, CreationDate)
+values (2, 1, "test question", 1, NOW(), "test q", 0, 0, 0, NOW());
+
+select QuestionId, left(Detail, 100) from q_and_a_cache where QuestionId <= 5;
+
+update posts set Body = "edited q" where Id = 2;
+
+select QuestionId, left(Detail, 100) from q_and_a_cache where QuestionId <= 5;
+
+insert into posts (Id, PostTypeId, ParentId, Body, OwnerUserId, LastActivityDate, Title, AnswerCount, CommentCount, FavoriteCount, CreationDate)
+values (4, 2, 2, "test answer", 2, NOW(), "", 0, 0, 0, NOW());
+
+select QuestionId, left(Detail, 100) from q_and_a_cache where QuestionId <= 5;
+
+update posts set Body = "edited a" where Id = 4;
+
+select QuestionId, left(Detail, 100) from q_and_a_cache where QuestionId <= 5;
+
+delete from posts where  Id = 4;
+
+select QuestionId, left(Detail, 100) from q_and_a_cache where QuestionId <= 5;
+
+delete from posts where Id = 2;
+
+select QuestionId, left(Detail, 100) from q_and_a_cache where QuestionId <= 5;
+```
 
 ### Exercise 5
 Using the materialized view from exercise 4, create a stored procedure with one parameter `keyword`, which returns all posts where the keyword appears at least once, and where at least two comments mention the keyword as well.
