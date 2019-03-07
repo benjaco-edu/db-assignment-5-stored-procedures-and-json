@@ -23,6 +23,12 @@ cd /workspace
 wget https://archive.org/download/stackexchange/askubuntu.com.7z
 7z e askubuntu.com.7z 
 ```
+or the smaller coffe dataset
+```
+cd /workspace
+wget https://archive.org/download/stackexchange/coffee.stackexchange.com.7z
+7z e coffee.stackexchange.com.7z
+```
 **The rest will be executed inside of the mysql bash**
 
 The flag is used to get access to the xml data when it has to be imported
